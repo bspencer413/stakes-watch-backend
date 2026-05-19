@@ -103,7 +103,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Stakes Watch API", version="0.1.2")
+app = FastAPI(title="Stakes Watch API", version="0.1.4")
 
 app.add_middleware(
     CORSMiddleware,
@@ -145,7 +145,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.1.2", "app": "Stakes Watch"}
+            "version": "0.1.4", "app": "Stakes Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -268,7 +268,9 @@ def clean_title(m):
     then yes_sub_title. Detects and rejects the comma-joined yes-prefixed
     concatenations that some multi-option Kalshi markets emit as their primary
     text (e.g. 'yes New York,yes Donovan Mitchell: 25+,yes Jalen Brunson: 25+').
-    Truncates anything over 120 chars."""
+    Truncates anything over 120 chars.
+    Returns None when no clean title is available — caller should skip the market
+    rather than show a raw ticker like KXMVESPORTSMULTIGAMEEXTENDED-S2026..."""
     subtitle = (m.get("subtitle") or "").strip()
     title = (m.get("title") or "").strip()
     yes_sub = (m.get("yes_sub_title") or "").strip()
@@ -284,17 +286,22 @@ def clean_title(m):
             if len(candidate) > 120:
                 return candidate[:117] + "..."
             return candidate
-    return m.get("ticker") or ""
+    return None
 
 
 def slim_market(m):
-    """Reduce a Kalshi market object to the fields the frontend needs."""
+    """Reduce a Kalshi market object to the fields the frontend needs.
+    Returns None for markets without a clean displayable title (multi-option
+    aggregates etc.) — these are filtered out of search and featured results."""
     if not isinstance(m, dict):
+        return None
+    title = clean_title(m)
+    if not title:
         return None
     return {
         "ticker": m.get("ticker"),
         "event_ticker": m.get("event_ticker"),
-        "title": clean_title(m),
+        "title": title,
         "subtitle": m.get("subtitle", ""),
         "yes_sub_title": m.get("yes_sub_title", ""),
         "no_sub_title": m.get("no_sub_title", ""),
@@ -367,17 +374,31 @@ def expand_query(q):
     return out
 
 
+def has_activity(m):
+    """A market counts as 'active for display' only if it has a last trade price
+    OR a non-zero 24h volume. Kalshi marks many empty multi-option shells as
+    status=active even though no one has traded them — those are pure noise."""
+    if not isinstance(m, dict):
+        return False
+    last = m.get("last_price")
+    vol = m.get("volume_24h")
+    if last is None and (vol is None or vol == 0):
+        return False
+    return True
+
+
 @app.get("/kalshi/search")
 async def kalshi_search(q: str = "", limit: int = 50):
     """Search open Kalshi markets by substring match on title fields.
-    Fetches a large batch of open markets and filters server-side, expanding
-    the query through SEARCH_ALIASES so user-friendly terms like 'bitcoin'
-    match Kalshi titles that use 'BTC'."""
+    Fetches a large batch of open markets, drops inactive shells, then filters
+    server-side. Search only looks at content fields — not tickers, which are
+    random hex hashes that produce false matches (e.g. 'fed' matching 'FEDD' in
+    a tennis market's hash)."""
     url = KALSHI_API_BASE + "/markets?status=open&limit=1000"
     data = fetch_url(url)
     if data is None:
         raise HTTPException(status_code=502, detail="Kalshi search failed")
-    markets = data.get("markets", [])
+    markets = [m for m in data.get("markets", []) if has_activity(m)]
 
     if q and q.strip():
         terms = expand_query(q)
@@ -389,8 +410,6 @@ async def kalshi_search(q: str = "", limit: int = 50):
                 str(m.get("yes_sub_title") or ""),
                 str(m.get("no_sub_title") or ""),
                 str(m.get("category") or ""),
-                str(m.get("event_ticker") or ""),
-                str(m.get("ticker") or ""),
             ]).lower()
             if any(t in haystack for t in terms):
                 filtered.append(m)
@@ -412,7 +431,7 @@ async def kalshi_featured(per_category: int = 2, limit: int = 12):
     data = fetch_url(url)
     if data is None:
         raise HTTPException(status_code=502, detail="Kalshi fetch failed")
-    markets = data.get("markets", [])
+    markets = [m for m in data.get("markets", []) if has_activity(m)]
 
     def vol_key(m):
         v = m.get("volume_24h", 0)
