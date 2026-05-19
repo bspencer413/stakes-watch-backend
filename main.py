@@ -103,7 +103,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Stakes Watch API", version="0.2.6")
+app = FastAPI(title="Stakes Watch API", version="0.2.7")
 
 app.add_middleware(
     CORSMiddleware,
@@ -145,7 +145,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.2.6", "app": "Stakes Watch"}
+            "version": "0.2.7", "app": "Stakes Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -371,6 +371,8 @@ def slim_market(m):
     return {
         "ticker": m.get("ticker"),
         "event_ticker": m.get("event_ticker"),
+        "event_title": m.get("event_title") or "",
+        "event_sub_title": m.get("event_sub_title") or "",
         "title": title,
         "subtitle": m.get("subtitle", ""),
         "yes_sub_title": m.get("yes_sub_title", ""),
@@ -624,15 +626,21 @@ def fetch_active_markets(target_count=400, max_pages=6):
             if ev_ticker.startswith("KXMVE"):
                 continue
             ev_category = (ev.get("category") or "").strip()
+            ev_title = (ev.get("title") or "").strip()
+            ev_sub_title = (ev.get("sub_title") or "").strip()
             ev_markets = ev.get("markets") or []
             for m in ev_markets:
                 if not isinstance(m, dict):
                     continue
                 if is_parlay(m):
                     continue
-                # Propagate event-level category onto market for downstream filtering
+                # Propagate event-level context onto market for downstream filtering and display
                 if ev_category and not (m.get("category") or "").strip():
                     m["category"] = ev_category
+                if ev_title:
+                    m["event_title"] = ev_title
+                if ev_sub_title:
+                    m["event_sub_title"] = ev_sub_title
                 out.append(m)
         if len(out) >= target_count:
             break
