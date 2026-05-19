@@ -103,7 +103,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Stakes Watch API", version="0.1.0")
+app = FastAPI(title="Stakes Watch API", version="0.1.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -145,7 +145,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.1.0", "app": "Stakes Watch"}
+            "version": "0.1.1", "app": "Stakes Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -290,18 +290,73 @@ def slim_market(m):
     }
 
 
+# Alias map: user-friendly term -> list of substrings to match against Kalshi market fields.
+# Lets users search "bitcoin" and find markets that Kalshi titles "BTC". Keep entries lowercase.
+SEARCH_ALIASES = {
+    "bitcoin": ["bitcoin", "btc"],
+    "btc": ["bitcoin", "btc"],
+    "ethereum": ["ethereum", "eth"],
+    "eth": ["ethereum", "eth"],
+    "crypto": ["bitcoin", "btc", "ethereum", "eth", "crypto"],
+    "fed": ["fed", "federal reserve", "fomc", "rate decision"],
+    "rates": ["fed", "fomc", "rate", "interest rate"],
+    "inflation": ["inflation", "cpi", "consumer price"],
+    "gdp": ["gdp", "gross domestic"],
+    "election": ["election", "vote", "ballot", "primary"],
+    "presidential": ["president", "presidential", "approval", "election"],
+    "trump": ["trump", "approval"],
+    "hurricane": ["hurricane", "tropical storm", "named storm"],
+    "weather": ["weather", "temperature", "hurricane", "storm", "snow"],
+    "super bowl": ["super bowl", "nfl championship", "lombardi"],
+    "world series": ["world series", "mlb championship"],
+    "stanley cup": ["stanley cup", "nhl championship"],
+    "nba championship": ["nba championship", "finals mvp"],
+    "world cup": ["world cup", "fifa"],
+    "oscar": ["oscar", "academy award", "best picture", "best actor"],
+    "grammy": ["grammy", "best album", "record of the year"],
+    "ai": ["ai", "artificial intelligence", "openai", "anthropic", "llm"],
+    "space": ["space", "spacex", "rocket launch", "starlink"],
+}
+
+
+def expand_query(q):
+    """Expand a user query through the alias map. Returns a list of lowercase
+    substrings to match against Kalshi market fields. Falls back to the raw
+    query (and its individual words) when no alias matches."""
+    if not q or not q.strip():
+        return []
+    q_lower = q.strip().lower()
+    terms = [q_lower]
+    if q_lower in SEARCH_ALIASES:
+        terms = list(SEARCH_ALIASES[q_lower])
+    else:
+        for word in q_lower.split():
+            if word in SEARCH_ALIASES:
+                terms.extend(SEARCH_ALIASES[word])
+    # Dedupe while preserving order
+    seen = set()
+    out = []
+    for t in terms:
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
 @app.get("/kalshi/search")
 async def kalshi_search(q: str = "", limit: int = 50):
     """Search open Kalshi markets by substring match on title fields.
-    Fetches a batch of open markets and filters server-side."""
-    url = KALSHI_API_BASE + "/markets?status=open&limit=200"
+    Fetches a large batch of open markets and filters server-side, expanding
+    the query through SEARCH_ALIASES so user-friendly terms like 'bitcoin'
+    match Kalshi titles that use 'BTC'."""
+    url = KALSHI_API_BASE + "/markets?status=open&limit=1000"
     data = fetch_url(url)
     if data is None:
         raise HTTPException(status_code=502, detail="Kalshi search failed")
     markets = data.get("markets", [])
 
     if q and q.strip():
-        q_lower = q.strip().lower()
+        terms = expand_query(q)
         filtered = []
         for m in markets:
             haystack = " ".join([
@@ -311,14 +366,39 @@ async def kalshi_search(q: str = "", limit: int = 50):
                 str(m.get("no_sub_title") or ""),
                 str(m.get("category") or ""),
                 str(m.get("event_ticker") or ""),
+                str(m.get("ticker") or ""),
             ]).lower()
-            if q_lower in haystack:
+            if any(t in haystack for t in terms):
                 filtered.append(m)
         markets = filtered
 
     slimmed = [slim_market(m) for m in markets[:limit]]
     slimmed = [s for s in slimmed if s is not None]
-    return {"results": slimmed, "count": len(slimmed), "query": q}
+    return {"results": slimmed, "count": len(slimmed), "query": q, "expanded": expand_query(q) if q else []}
+
+
+@app.get("/kalshi/featured")
+async def kalshi_featured(limit: int = 10):
+    """Return the top open Kalshi markets sorted by 24h volume (most active first).
+    Used by the frontend's empty-search-state featured card so new users see
+    what's hot without having to think of a query."""
+    url = KALSHI_API_BASE + "/markets?status=open&limit=1000"
+    data = fetch_url(url)
+    if data is None:
+        raise HTTPException(status_code=502, detail="Kalshi fetch failed")
+    markets = data.get("markets", [])
+
+    def vol_key(m):
+        v = m.get("volume_24h", 0)
+        try:
+            return -int(v) if v else 0
+        except Exception:
+            return 0
+
+    markets.sort(key=vol_key)
+    slimmed = [slim_market(m) for m in markets[:limit]]
+    slimmed = [s for s in slimmed if s is not None]
+    return {"results": slimmed, "count": len(slimmed)}
 
 
 @app.get("/kalshi/market/{ticker}")
