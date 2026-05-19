@@ -103,7 +103,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Stakes Watch API", version="0.2.4")
+app = FastAPI(title="Stakes Watch API", version="0.2.5")
 
 app.add_middleware(
     CORSMiddleware,
@@ -145,7 +145,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.2.4", "app": "Stakes Watch"}
+            "version": "0.2.5", "app": "Stakes Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -392,32 +392,34 @@ def slim_market(m):
     }
 
 
-# Kalshi's canonical user-facing category list (matches their site navigation).
-# Used by /kalshi/categories and /kalshi/markets-by-category.
+# Kalshi's user-facing category list (matches our UI tiles, ordered by real market
+# count from /kalshi/category-counts as of the last refresh). Crypto/Commodities
+# omitted — they return zero markets in the current /events feed. Re-add if Kalshi
+# starts populating them again.
 KALSHI_CATEGORIES = [
-    "Trending", "Elections", "Politics", "Sports", "Culture",
-    "Crypto", "Commodities", "Climate", "Economics",
-    "Companies", "Financials", "Tech & Science",
+    "Trending", "Elections", "Culture", "Politics", "Sports",
+    "Economics", "Companies", "Climate", "Tech & Science",
+    "Financials", "World", "Health",
 ]
 
 
 # Maps each UI category (lowercase key) to the lowercase API category strings
-# Kalshi actually returns in market.category. Kalshi's UI labels do NOT match
-# their API values 1:1 (e.g. UI 'Culture' = API 'Entertainment', confirmed via
-# /kalshi/category-counts). Refine this as new mismatches surface.
+# Kalshi actually returns in market.category. All aliases below verified against
+# /kalshi/category-counts real data (Entertainment, Climate and Weather, Science
+# and Technology, etc.). UI labels do NOT match API values 1:1.
 CATEGORY_ALIASES = {
     "trending":       [],  # Special: matches all, sorted by volume
     "elections":      ["elections"],
+    "culture":        ["entertainment", "culture"],
     "politics":       ["politics"],
     "sports":         ["sports"],
-    "culture":        ["culture", "entertainment"],
-    "crypto":         ["crypto", "cryptocurrency"],
-    "commodities":    ["commodities"],
-    "climate":        ["climate", "weather"],
-    "economics":      ["economics", "macro", "macroeconomics"],
-    "companies":      ["companies", "corporate"],
-    "financials":     ["financials", "finance", "financial markets"],
-    "tech & science": ["tech & science", "technology", "tech", "science"],
+    "economics":      ["economics"],
+    "companies":      ["companies"],
+    "climate":        ["climate and weather", "climate", "weather"],
+    "tech & science": ["science and technology", "technology", "science", "tech & science"],
+    "financials":     ["financials"],
+    "world":          ["world"],
+    "health":         ["health"],
 }
 
 
