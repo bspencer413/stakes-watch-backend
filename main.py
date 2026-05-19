@@ -103,7 +103,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Stakes Watch API", version="0.1.5")
+app = FastAPI(title="Stakes Watch API", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -145,7 +145,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.1.5", "app": "Stakes Watch"}
+            "version": "0.2.0", "app": "Stakes Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -262,6 +262,74 @@ def fetch_url(url: str, timeout: int = 15):
         return None
 
 
+def parse_price_cents(val):
+    """Convert Kalshi's new dollar-string field (e.g. '0.6500') to int cents 0-100.
+    Returns None for empty/null/non-numeric input."""
+    if val is None or val == "":
+        return None
+    try:
+        return int(round(float(val) * 100))
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_volume(val):
+    """Convert Kalshi's volume_fp string (e.g. '12345.00') to int. Returns None
+    for empty/null/non-numeric input."""
+    if val is None or val == "":
+        return None
+    try:
+        return int(float(val))
+    except (ValueError, TypeError):
+        return None
+
+
+def market_last_price_cents(m):
+    """Read last price as int cents 0-100 from whichever field Kalshi uses.
+    They added *_dollars (float string) alongside the old *_price (int cents)."""
+    val = m.get("last_price_dollars")
+    if val not in (None, "", "0", "0.0", "0.00", "0.0000"):
+        out = parse_price_cents(val)
+        if out is not None and out > 0:
+            return out
+    val = m.get("last_price")
+    if isinstance(val, (int, float)) and val > 0:
+        return int(val)
+    return None
+
+
+def market_volume_24h(m):
+    """Read 24h volume as int from whichever field Kalshi uses."""
+    val = m.get("volume_24h_fp")
+    if val not in (None, "", "0", "0.0", "0.00"):
+        out = parse_volume(val)
+        if out:
+            return out
+    val = m.get("volume_24h")
+    if isinstance(val, (int, float)) and val > 0:
+        return int(val)
+    return None
+
+
+def is_parlay(m):
+    """Detect Kalshi's auto-generated multi-leg parlay markets. These show up as
+    'multi-game extended' and 'cross-category' bundles, displayed with payout
+    multipliers like '1.3X .92' on Kalshi. They flood the /markets endpoint and
+    don't fit our binary YES/NO watchlist model."""
+    if not isinstance(m, dict):
+        return False
+    if m.get("is_provisional"):
+        return True
+    if m.get("strike_type") == "custom":
+        return True
+    if m.get("mve_selected_legs"):
+        return True
+    ticker = m.get("ticker") or ""
+    if ticker.startswith("KXMVE"):  # Multi-Variate Event prefix
+        return True
+    return False
+
+
 def clean_title(m):
     """Pick the cleanest human-readable title for a Kalshi market.
     Prefers subtitle (per-market question form), falls back to title (event-level),
@@ -269,8 +337,7 @@ def clean_title(m):
     concatenations that some multi-option Kalshi markets emit as their primary
     text (e.g. 'yes New York,yes Donovan Mitchell: 25+,yes Jalen Brunson: 25+').
     Truncates anything over 120 chars.
-    Returns None when no clean title is available — caller should skip the market
-    rather than show a raw ticker like KXMVESPORTSMULTIGAMEEXTENDED-S2026..."""
+    Returns None when no clean title is available."""
     subtitle = (m.get("subtitle") or "").strip()
     title = (m.get("title") or "").strip()
     yes_sub = (m.get("yes_sub_title") or "").strip()
@@ -291,9 +358,12 @@ def clean_title(m):
 
 def slim_market(m):
     """Reduce a Kalshi market object to the fields the frontend needs.
-    Returns None for markets without a clean displayable title (multi-option
-    aggregates etc.) — these are filtered out of search and featured results."""
+    Returns None for parlays, for markets without a clean displayable title,
+    and normalizes Kalshi's *_dollars / *_fp string fields to int cents / int
+    volume so the frontend can treat all markets uniformly."""
     if not isinstance(m, dict):
+        return None
+    if is_parlay(m):
         return None
     title = clean_title(m)
     if not title:
@@ -305,20 +375,99 @@ def slim_market(m):
         "subtitle": m.get("subtitle", ""),
         "yes_sub_title": m.get("yes_sub_title", ""),
         "no_sub_title": m.get("no_sub_title", ""),
-        "last_price": m.get("last_price"),
-        "yes_bid": m.get("yes_bid"),
-        "yes_ask": m.get("yes_ask"),
-        "no_bid": m.get("no_bid"),
-        "no_ask": m.get("no_ask"),
-        "volume": m.get("volume"),
-        "volume_24h": m.get("volume_24h"),
+        "last_price": market_last_price_cents(m),
+        "yes_bid": parse_price_cents(m.get("yes_bid_dollars")) if m.get("yes_bid_dollars") else m.get("yes_bid"),
+        "yes_ask": parse_price_cents(m.get("yes_ask_dollars")) if m.get("yes_ask_dollars") else m.get("yes_ask"),
+        "no_bid": parse_price_cents(m.get("no_bid_dollars")) if m.get("no_bid_dollars") else m.get("no_bid"),
+        "no_ask": parse_price_cents(m.get("no_ask_dollars")) if m.get("no_ask_dollars") else m.get("no_ask"),
+        "volume": parse_volume(m.get("volume_fp")) if m.get("volume_fp") else m.get("volume"),
+        "volume_24h": market_volume_24h(m),
         "open_time": m.get("open_time"),
         "close_time": m.get("close_time"),
         "expiration_time": m.get("expiration_time"),
         "status": m.get("status"),
         "result": m.get("result", ""),
-        "category": m.get("category", ""),
+        "category": market_category(m),
     }
+
+
+# Kalshi's canonical user-facing category list (matches their site navigation).
+# Used by /kalshi/categories and /kalshi/markets-by-category.
+KALSHI_CATEGORIES = [
+    "Trending", "Elections", "Politics", "Sports", "Culture",
+    "Crypto", "Commodities", "Climate", "Economics",
+    "Companies", "Financials", "Tech & Science",
+]
+
+
+# Fallback ticker-prefix → category mapping for markets that don't populate the
+# `category` field cleanly. Order matters: most specific prefix first.
+TICKER_PREFIX_CATEGORY = [
+    ("KXFED",        "Economics"),
+    ("KXCPI",        "Economics"),
+    ("KXGDP",        "Economics"),
+    ("KXUNEMP",      "Economics"),
+    ("KXINFL",       "Economics"),
+    ("KXJOBS",       "Economics"),
+    ("KXBTC",        "Crypto"),
+    ("KXETH",        "Crypto"),
+    ("KXSOL",        "Crypto"),
+    ("KXCRYPTO",     "Crypto"),
+    ("KXNBA",        "Sports"),
+    ("KXMLB",        "Sports"),
+    ("KXNFL",        "Sports"),
+    ("KXNHL",        "Sports"),
+    ("KXEPL",        "Sports"),
+    ("KXLALIGA",     "Sports"),
+    ("KXSERIE",      "Sports"),
+    ("KXATP",        "Sports"),
+    ("KXWTA",        "Sports"),
+    ("KXMLS",        "Sports"),
+    ("KXPGA",        "Sports"),
+    ("KXUFC",        "Sports"),
+    ("KXPRES",       "Politics"),
+    ("KXSENATE",     "Politics"),
+    ("KXHOUSE",      "Politics"),
+    ("KXAPPROVAL",   "Politics"),
+    ("KXELECTION",   "Elections"),
+    ("KXVOTE",       "Elections"),
+    ("KXHURRICANE",  "Climate"),
+    ("KXTEMP",       "Climate"),
+    ("KXSNOW",       "Climate"),
+    ("KXRAIN",       "Climate"),
+    ("KXOSCAR",      "Culture"),
+    ("KXGRAMMY",     "Culture"),
+    ("KXEMMY",       "Culture"),
+    ("KXBOX",        "Culture"),
+    ("KXAI",         "Tech & Science"),
+    ("KXSPACE",      "Tech & Science"),
+    ("KXSPACEX",     "Tech & Science"),
+    ("KXSCIENCE",    "Tech & Science"),
+    ("KXIPO",        "Companies"),
+    ("KXACQ",        "Companies"),
+    ("KXSTOCK",      "Financials"),
+    ("KXBOND",       "Financials"),
+    ("KXVIX",        "Financials"),
+    ("KXOIL",        "Commodities"),
+    ("KXGAS",        "Commodities"),
+    ("KXGOLD",       "Commodities"),
+    ("KXSILVER",     "Commodities"),
+    ("KXCORN",       "Commodities"),
+    ("KXWHEAT",      "Commodities"),
+]
+
+
+def market_category(m):
+    """Best-effort category resolution: Kalshi's own field first, then ticker
+    prefix inference if that's empty."""
+    cat = (m.get("category") or "").strip()
+    if cat:
+        return cat
+    ticker = (m.get("ticker") or "").upper()
+    for prefix, label in TICKER_PREFIX_CATEGORY:
+        if ticker.startswith(prefix):
+            return label
+    return ""
 
 
 # Alias map: user-friendly term -> list of substrings to match against Kalshi market fields.
@@ -376,15 +525,18 @@ def expand_query(q):
 
 def has_activity(m):
     """A market counts as 'active for display' only if it has a last trade price
-    OR a non-zero 24h volume. Kalshi marks many empty multi-option shells as
-    status=active even though no one has traded them — those are pure noise."""
+    OR non-zero 24h volume AND it's not a parlay shell. Kalshi's /markets
+    endpoint floods the top with auto-generated multi-leg parlays (KXMVE...) that
+    are all priced 0¢ with 0 volume — those are pure noise."""
     if not isinstance(m, dict):
         return False
-    last = m.get("last_price")
-    vol = m.get("volume_24h")
-    if last is None and (vol is None or vol == 0):
+    if is_parlay(m):
         return False
-    return True
+    if market_last_price_cents(m) is not None:
+        return True
+    if market_volume_24h(m):
+        return True
+    return False
 
 
 def fetch_active_markets(target_count=400, max_pages=5):
@@ -495,6 +647,51 @@ async def kalshi_featured(per_category: int = 2, limit: int = 12):
     slimmed = [slim_market(m) for m in featured]
     slimmed = [s for s in slimmed if s is not None]
     return {"results": slimmed, "count": len(slimmed), "per_category": per_category}
+
+
+@app.get("/kalshi/categories")
+async def kalshi_categories():
+    """Return Kalshi's canonical category list for frontend navigation tiles."""
+    return {"categories": KALSHI_CATEGORIES}
+
+
+@app.get("/kalshi/markets-by-category")
+async def kalshi_markets_by_category(cat: str, limit: int = 30):
+    """Return active binary markets in a given Kalshi category, sorted by 24h
+    volume desc. Special-cases 'Trending' to mean all categories combined,
+    sorted by volume. Parlay markets are filtered out upstream by has_activity."""
+    cat_input = (cat or "").strip()
+    if not cat_input:
+        raise HTTPException(status_code=400, detail="Missing category")
+    markets = fetch_active_markets(target_count=600, max_pages=6)
+    if not markets:
+        raise HTTPException(status_code=502, detail="Kalshi fetch failed or no active markets")
+
+    def vol_key(m):
+        return -(market_volume_24h(m) or 0)
+
+    cat_lower = cat_input.lower()
+
+    if cat_lower == "trending":
+        # All active markets, sorted by volume desc
+        candidates = sorted(markets, key=vol_key)
+    else:
+        # Match against resolved category (Kalshi's category field, with ticker-prefix fallback)
+        candidates = []
+        for m in markets:
+            m_cat = (market_category(m) or "").strip().lower()
+            if m_cat == cat_lower:
+                candidates.append(m)
+        candidates.sort(key=vol_key)
+
+    slimmed = []
+    for m in candidates:
+        s = slim_market(m)
+        if s is not None:
+            slimmed.append(s)
+        if len(slimmed) >= limit:
+            break
+    return {"results": slimmed, "count": len(slimmed), "category": cat_input}
 
 
 @app.get("/kalshi/market/{ticker}")
