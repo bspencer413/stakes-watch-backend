@@ -103,7 +103,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Stakes Watch API", version="0.2.0")
+app = FastAPI(title="Stakes Watch API", version="0.2.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -145,7 +145,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.2.0", "app": "Stakes Watch"}
+            "version": "0.2.1", "app": "Stakes Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -524,19 +524,15 @@ def expand_query(q):
 
 
 def has_activity(m):
-    """A market counts as 'active for display' only if it has a last trade price
-    OR non-zero 24h volume AND it's not a parlay shell. Kalshi's /markets
-    endpoint floods the top with auto-generated multi-leg parlays (KXMVE...) that
-    are all priced 0¢ with 0 volume — those are pure noise."""
+    """A market is included if it's not an auto-generated parlay shell. The earlier
+    'require last_price or volume_24h > 0' rule wrongly excluded real binary markets
+    that just haven't traded yet (fresh markets, longer-dated, quieter contracts).
+    Sorting by volume at the endpoint level already pushes the most-active to the top."""
     if not isinstance(m, dict):
         return False
     if is_parlay(m):
         return False
-    if market_last_price_cents(m) is not None:
-        return True
-    if market_volume_24h(m):
-        return True
-    return False
+    return True
 
 
 def fetch_active_markets(target_count=400, max_pages=5):
