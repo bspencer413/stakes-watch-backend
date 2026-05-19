@@ -103,7 +103,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Stakes Watch API", version="0.2.2")
+app = FastAPI(title="Stakes Watch API", version="0.2.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -145,7 +145,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.2.2", "app": "Stakes Watch"}
+            "version": "0.2.3", "app": "Stakes Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -398,6 +398,26 @@ KALSHI_CATEGORIES = [
     "Crypto", "Commodities", "Climate", "Economics",
     "Companies", "Financials", "Tech & Science",
 ]
+
+
+# Maps each UI category (lowercase key) to the lowercase API category strings
+# Kalshi actually returns in market.category. Kalshi's UI labels do NOT match
+# their API values 1:1 (e.g. UI 'Culture' = API 'Entertainment', confirmed via
+# /kalshi/category-counts). Refine this as new mismatches surface.
+CATEGORY_ALIASES = {
+    "trending":       [],  # Special: matches all, sorted by volume
+    "elections":      ["elections"],
+    "politics":       ["politics"],
+    "sports":         ["sports"],
+    "culture":        ["culture", "entertainment"],
+    "crypto":         ["crypto", "cryptocurrency"],
+    "commodities":    ["commodities"],
+    "climate":        ["climate", "weather"],
+    "economics":      ["economics", "macro", "macroeconomics"],
+    "companies":      ["companies", "corporate"],
+    "financials":     ["financials", "finance", "financial markets"],
+    "tech & science": ["tech & science", "technology", "tech", "science"],
+}
 
 
 # Fallback ticker-prefix → category mapping for markets that don't populate the
@@ -693,11 +713,13 @@ async def kalshi_markets_by_category(cat: str, limit: int = 30):
         # All active markets, sorted by volume desc
         candidates = sorted(markets, key=vol_key)
     else:
-        # Match against resolved category (Kalshi's category field, with ticker-prefix fallback)
+        # Match against resolved category via alias map — Kalshi's UI labels don't
+        # match their API values (e.g. UI 'Culture' = API 'Entertainment').
+        aliases = CATEGORY_ALIASES.get(cat_lower, [cat_lower])
         candidates = []
         for m in markets:
             m_cat = (market_category(m) or "").strip().lower()
-            if m_cat == cat_lower:
+            if m_cat in aliases:
                 candidates.append(m)
         candidates.sort(key=vol_key)
 
@@ -709,6 +731,21 @@ async def kalshi_markets_by_category(cat: str, limit: int = 30):
         if len(slimmed) >= limit:
             break
     return {"results": slimmed, "count": len(slimmed), "category": cat_input}
+
+
+@app.get("/kalshi/category-counts")
+async def kalshi_category_counts():
+    """Debug: scan active events/markets and return how many fall into each
+    Kalshi category value. Used to verify and refine CATEGORY_ALIASES — Kalshi's
+    UI labels (Culture, Tech & Science, etc.) don't always match their API
+    category field values (Entertainment, Technology, etc.)."""
+    markets = fetch_active_markets(target_count=2000, max_pages=10)
+    counts = {}
+    for m in markets:
+        cat = (market_category(m) or "").strip() or "(empty)"
+        counts[cat] = counts.get(cat, 0) + 1
+    sorted_counts = sorted(counts.items(), key=lambda x: -x[1])
+    return {"total_markets": len(markets), "categories": sorted_counts}
 
 
 @app.get("/kalshi/market/{ticker}")
