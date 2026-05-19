@@ -103,7 +103,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Stakes Watch API", version="0.1.1")
+app = FastAPI(title="Stakes Watch API", version="0.1.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -145,7 +145,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.1.1", "app": "Stakes Watch"}
+            "version": "0.1.2", "app": "Stakes Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -262,15 +262,39 @@ def fetch_url(url: str, timeout: int = 15):
         return None
 
 
+def clean_title(m):
+    """Pick the cleanest human-readable title for a Kalshi market.
+    Prefers subtitle (per-market question form), falls back to title (event-level),
+    then yes_sub_title. Detects and rejects the comma-joined yes-prefixed
+    concatenations that some multi-option Kalshi markets emit as their primary
+    text (e.g. 'yes New York,yes Donovan Mitchell: 25+,yes Jalen Brunson: 25+').
+    Truncates anything over 120 chars."""
+    subtitle = (m.get("subtitle") or "").strip()
+    title = (m.get("title") or "").strip()
+    yes_sub = (m.get("yes_sub_title") or "").strip()
+
+    def is_ugly_yes_join(s):
+        if not s:
+            return False
+        low = s.lower()
+        return low.count(",yes ") >= 2 or low.count(", yes ") >= 2
+
+    for candidate in (subtitle, title, yes_sub):
+        if candidate and not is_ugly_yes_join(candidate):
+            if len(candidate) > 120:
+                return candidate[:117] + "..."
+            return candidate
+    return m.get("ticker") or ""
+
+
 def slim_market(m):
     """Reduce a Kalshi market object to the fields the frontend needs."""
     if not isinstance(m, dict):
         return None
-    title = (m.get("title") or m.get("subtitle") or m.get("yes_sub_title") or "")
     return {
         "ticker": m.get("ticker"),
         "event_ticker": m.get("event_ticker"),
-        "title": title,
+        "title": clean_title(m),
         "subtitle": m.get("subtitle", ""),
         "yes_sub_title": m.get("yes_sub_title", ""),
         "no_sub_title": m.get("no_sub_title", ""),
@@ -378,10 +402,12 @@ async def kalshi_search(q: str = "", limit: int = 50):
 
 
 @app.get("/kalshi/featured")
-async def kalshi_featured(limit: int = 10):
-    """Return the top open Kalshi markets sorted by 24h volume (most active first).
-    Used by the frontend's empty-search-state featured card so new users see
-    what's hot without having to think of a query."""
+async def kalshi_featured(per_category: int = 2, limit: int = 12):
+    """Return a diverse set of featured markets — top N per category by 24h volume.
+    Avoids the all-sports-dominate problem of sorting flat by volume. Categories
+    themselves are ordered by their total 24h volume so the most-active sector
+    surfaces first, but with breathing room for politics/Fed/crypto/weather/etc.
+    backward-compatible: still accepts &limit= which caps the total returned."""
     url = KALSHI_API_BASE + "/markets?status=open&limit=1000"
     data = fetch_url(url)
     if data is None:
@@ -395,10 +421,37 @@ async def kalshi_featured(limit: int = 10):
         except Exception:
             return 0
 
-    markets.sort(key=vol_key)
-    slimmed = [slim_market(m) for m in markets[:limit]]
+    # Group by category
+    by_cat = {}
+    for m in markets:
+        cat = (m.get("category") or "Other").strip() or "Other"
+        by_cat.setdefault(cat, []).append(m)
+
+    # Compute total volume per category for ordering
+    cat_total = {}
+    for cat, cms in by_cat.items():
+        total = 0
+        for m in cms:
+            try:
+                total += int(m.get("volume_24h", 0) or 0)
+            except Exception:
+                pass
+        cat_total[cat] = total
+
+    ordered_cats = sorted(by_cat.keys(), key=lambda c: -cat_total.get(c, 0))
+
+    featured = []
+    for cat in ordered_cats:
+        cms = by_cat[cat]
+        cms.sort(key=vol_key)
+        # Skip ugly multi-option mess at the top of categories
+        clean_cms = [m for m in cms if (m.get("subtitle") or m.get("title"))]
+        featured.extend(clean_cms[:per_category])
+
+    featured = featured[:limit]
+    slimmed = [slim_market(m) for m in featured]
     slimmed = [s for s in slimmed if s is not None]
-    return {"results": slimmed, "count": len(slimmed)}
+    return {"results": slimmed, "count": len(slimmed), "per_category": per_category}
 
 
 @app.get("/kalshi/market/{ticker}")
