@@ -103,7 +103,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Stakes Watch API", version="0.1.4")
+app = FastAPI(title="Stakes Watch API", version="0.1.5")
 
 app.add_middleware(
     CORSMiddleware,
@@ -145,7 +145,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.1.4", "app": "Stakes Watch"}
+            "version": "0.1.5", "app": "Stakes Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -387,18 +387,43 @@ def has_activity(m):
     return True
 
 
+def fetch_active_markets(target_count=400, max_pages=5):
+    """Fetch open Kalshi markets across multiple pages until we have target_count
+    markets with actual trading activity (or hit max_pages). Kalshi's default
+    /markets ordering returns newly-created empty multi-option shells first;
+    real markets are on later pages. Pagination is via the response's cursor field."""
+    active = []
+    cursor = ""
+    for _ in range(max_pages):
+        url = KALSHI_API_BASE + "/markets?status=open&limit=1000"
+        if cursor:
+            url += "&cursor=" + urllib.parse.quote(cursor)
+        data = fetch_url(url)
+        if data is None:
+            break
+        page_markets = data.get("markets", [])
+        if not page_markets:
+            break
+        for m in page_markets:
+            if has_activity(m):
+                active.append(m)
+        if len(active) >= target_count:
+            break
+        cursor = data.get("cursor", "")
+        if not cursor:
+            break
+    return active
+
+
 @app.get("/kalshi/search")
 async def kalshi_search(q: str = "", limit: int = 50):
-    """Search open Kalshi markets by substring match on title fields.
-    Fetches a large batch of open markets, drops inactive shells, then filters
-    server-side. Search only looks at content fields — not tickers, which are
-    random hex hashes that produce false matches (e.g. 'fed' matching 'FEDD' in
-    a tennis market's hash)."""
-    url = KALSHI_API_BASE + "/markets?status=open&limit=1000"
-    data = fetch_url(url)
-    if data is None:
-        raise HTTPException(status_code=502, detail="Kalshi search failed")
-    markets = [m for m in data.get("markets", []) if has_activity(m)]
+    """Search active Kalshi markets by substring match on content fields.
+    Uses paginated fetch (fetch_active_markets) to look past Kalshi's many
+    newly-created empty shells. Search only looks at content fields — not
+    tickers, which are random hex hashes that produce false matches."""
+    markets = fetch_active_markets()
+    if not markets:
+        raise HTTPException(status_code=502, detail="Kalshi search failed or no active markets")
 
     if q and q.strip():
         terms = expand_query(q)
@@ -417,7 +442,8 @@ async def kalshi_search(q: str = "", limit: int = 50):
 
     slimmed = [slim_market(m) for m in markets[:limit]]
     slimmed = [s for s in slimmed if s is not None]
-    return {"results": slimmed, "count": len(slimmed), "query": q, "expanded": expand_query(q) if q else []}
+    return {"results": slimmed, "count": len(slimmed), "query": q,
+            "expanded": expand_query(q) if q else [], "pool_size": "paginated"}
 
 
 @app.get("/kalshi/featured")
@@ -427,11 +453,9 @@ async def kalshi_featured(per_category: int = 2, limit: int = 12):
     themselves are ordered by their total 24h volume so the most-active sector
     surfaces first, but with breathing room for politics/Fed/crypto/weather/etc.
     backward-compatible: still accepts &limit= which caps the total returned."""
-    url = KALSHI_API_BASE + "/markets?status=open&limit=1000"
-    data = fetch_url(url)
-    if data is None:
-        raise HTTPException(status_code=502, detail="Kalshi fetch failed")
-    markets = [m for m in data.get("markets", []) if has_activity(m)]
+    markets = fetch_active_markets()
+    if not markets:
+        raise HTTPException(status_code=502, detail="Kalshi fetch failed or no active markets")
 
     def vol_key(m):
         v = m.get("volume_24h", 0)
