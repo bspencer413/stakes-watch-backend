@@ -103,7 +103,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Stakes Watch API", version="0.2.5")
+app = FastAPI(title="Stakes Watch API", version="0.2.6")
 
 app.add_middleware(
     CORSMiddleware,
@@ -145,7 +145,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.2.5", "app": "Stakes Watch"}
+            "version": "0.2.6", "app": "Stakes Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -519,23 +519,59 @@ SEARCH_ALIASES = {
     "grammy": ["grammy", "best album", "record of the year"],
     "ai": ["ai", "artificial intelligence", "openai", "anthropic", "llm"],
     "space": ["space", "spacex", "rocket launch", "starlink"],
+    "nuclear": ["nuclear", "nukes", "nuke"],
+    "nukes": ["nuclear", "nukes", "nuke"],
+    "iran": ["iran", "iranian"],
+    "israel": ["israel", "israeli", "gaza"],
+    "gaza": ["israel", "israeli", "gaza"],
+    "ukraine": ["ukraine", "russia", "russian"],
+    "russia": ["russia", "russian", "putin"],
+    "putin": ["russia", "russian", "putin"],
+    "china": ["china", "chinese", "xi"],
+    "war": ["war", "conflict", "military", "invasion"],
+    "military": ["war", "conflict", "military"],
+}
+
+
+SEARCH_STOP_WORDS = {
+    "will", "what", "when", "where", "which", "who", "why", "how",
+    "the", "and", "or", "but", "if", "any", "all", "for", "from",
+    "with", "to", "of", "in", "on", "at", "by", "as", "is", "are",
+    "was", "were", "be", "been", "being", "have", "has", "had",
+    "do", "does", "did", "this", "that", "these", "those", "a", "an",
+    "use", "uses", "used", "into", "than", "then", "still",
 }
 
 
 def expand_query(q):
-    """Expand a user query through the alias map. Returns a list of lowercase
-    substrings to match against Kalshi market fields. Falls back to the raw
-    query (and its individual words) when no alias matches."""
+    """Expand a user query into search terms. Strategy:
+    (1) Tokenize the query, strip punctuation, drop stop words.
+    (2) For each remaining 3+ char word: if it's in the alias map, add its
+        expansion; otherwise add the word itself (substring-matched against
+        the live Kalshi corpus — the corpus IS the dictionary for unaliased
+        words). This way 'iran' or 'nukes' work even without being aliased.
+    (3) Also preserve the full lowercased query for exact-phrase matches.
+    Returns a deduped list of lowercase search terms."""
     if not q or not q.strip():
         return []
     q_lower = q.strip().lower()
     terms = [q_lower]
+    # Exact alias hit on the full phrase wins (e.g. "super bowl")
     if q_lower in SEARCH_ALIASES:
         terms = list(SEARCH_ALIASES[q_lower])
     else:
-        for word in q_lower.split():
+        # Tokenize: keep alphanumerics, treat everything else as separator
+        import re
+        words = re.findall(r"[a-z0-9]+", q_lower)
+        for word in words:
+            if len(word) < 3:
+                continue
+            if word in SEARCH_STOP_WORDS:
+                continue
             if word in SEARCH_ALIASES:
                 terms.extend(SEARCH_ALIASES[word])
+            else:
+                terms.append(word)
     # Dedupe while preserving order
     seen = set()
     out = []
