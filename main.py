@@ -103,7 +103,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Stakes Watch API", version="0.2.3")
+app = FastAPI(title="Stakes Watch API", version="0.2.4")
 
 app.add_middleware(
     CORSMiddleware,
@@ -145,7 +145,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.2.3", "app": "Stakes Watch"}
+            "version": "0.2.4", "app": "Stakes Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -376,6 +376,7 @@ def slim_market(m):
         "yes_sub_title": m.get("yes_sub_title", ""),
         "no_sub_title": m.get("no_sub_title", ""),
         "last_price": market_last_price_cents(m),
+        "previous_price": parse_price_cents(m.get("previous_price_dollars")) if m.get("previous_price_dollars") else None,
         "yes_bid": parse_price_cents(m.get("yes_bid_dollars")) if m.get("yes_bid_dollars") else m.get("yes_bid"),
         "yes_ask": parse_price_cents(m.get("yes_ask_dollars")) if m.get("yes_ask_dollars") else m.get("yes_ask"),
         "no_bid": parse_price_cents(m.get("no_bid_dollars")) if m.get("no_bid_dollars") else m.get("no_bid"),
