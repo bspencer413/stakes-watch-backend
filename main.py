@@ -103,7 +103,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Stakes Watch API", version="0.2.1")
+app = FastAPI(title="Stakes Watch API", version="0.2.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -145,7 +145,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.2.1", "app": "Stakes Watch"}
+            "version": "0.2.2", "app": "Stakes Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -535,32 +535,52 @@ def has_activity(m):
     return True
 
 
-def fetch_active_markets(target_count=400, max_pages=5):
-    """Fetch open Kalshi markets across multiple pages until we have target_count
-    markets with actual trading activity (or hit max_pages). Kalshi's default
-    /markets ordering returns newly-created empty multi-option shells first;
-    real markets are on later pages. Pagination is via the response's cursor field."""
-    active = []
+def fetch_active_markets(target_count=400, max_pages=6):
+    """Fetch open Kalshi events with their nested markets across multiple pages.
+    Returns a flat list of binary markets ready for slim_market / category matching.
+
+    Switched from /markets to /events in v0.2.2: the /markets endpoint is dominated
+    by auto-generated multi-leg parlay shells (KXMVE...) which cursor pagination
+    can't escape. /events returns the clean event-grouped data Kalshi uses on
+    their own site, with category populated at the event level. We propagate that
+    category down onto each market so downstream category matching works against
+    Kalshi's own taxonomy rather than my ticker-prefix guesses."""
+    out = []
     cursor = ""
     for _ in range(max_pages):
-        url = KALSHI_API_BASE + "/markets?status=open&limit=1000"
+        url = KALSHI_API_BASE + "/events?status=open&with_nested_markets=true&limit=200"
         if cursor:
-            url += "&cursor=" + urllib.parse.quote(cursor)
+            url += "&cursor=" + urllib.parse.quote(cursor, safe="")
         data = fetch_url(url)
         if data is None:
             break
-        page_markets = data.get("markets", [])
-        if not page_markets:
+        events = data.get("events", [])
+        if not events:
             break
-        for m in page_markets:
-            if has_activity(m):
-                active.append(m)
-        if len(active) >= target_count:
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            ev_ticker = ev.get("event_ticker") or ""
+            # Skip parlay-style events at the event level
+            if ev_ticker.startswith("KXMVE"):
+                continue
+            ev_category = (ev.get("category") or "").strip()
+            ev_markets = ev.get("markets") or []
+            for m in ev_markets:
+                if not isinstance(m, dict):
+                    continue
+                if is_parlay(m):
+                    continue
+                # Propagate event-level category onto market for downstream filtering
+                if ev_category and not (m.get("category") or "").strip():
+                    m["category"] = ev_category
+                out.append(m)
+        if len(out) >= target_count:
             break
         cursor = data.get("cursor", "")
         if not cursor:
             break
-    return active
+    return out
 
 
 @app.get("/kalshi/search")
@@ -655,7 +675,8 @@ async def kalshi_categories():
 async def kalshi_markets_by_category(cat: str, limit: int = 30):
     """Return active binary markets in a given Kalshi category, sorted by 24h
     volume desc. Special-cases 'Trending' to mean all categories combined,
-    sorted by volume. Parlay markets are filtered out upstream by has_activity."""
+    sorted by volume. Parlay events/markets are filtered out upstream in
+    fetch_active_markets (KXMVE-prefix events and parlay-shaped markets)."""
     cat_input = (cat or "").strip()
     if not cat_input:
         raise HTTPException(status_code=400, detail="Missing category")
