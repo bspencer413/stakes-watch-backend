@@ -103,7 +103,7 @@ class WatchlistItem(BaseModel):
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Stakes Watch API", version="0.2.7")
+app = FastAPI(title="Stakes Watch API", version="0.2.8")
 
 app.add_middleware(
     CORSMiddleware,
@@ -145,7 +145,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat(),
-            "version": "0.2.7", "app": "Stakes Watch"}
+            "version": "0.2.8", "app": "Stakes Watch"}
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 
@@ -670,6 +670,8 @@ async def kalshi_search(q: str = "", limit: int = 50):
                 str(m.get("yes_sub_title") or ""),
                 str(m.get("no_sub_title") or ""),
                 str(m.get("category") or ""),
+                str(m.get("event_title") or ""),
+                str(m.get("event_sub_title") or ""),
             ]).lower()
             if any(t in haystack for t in terms):
                 filtered.append(m)
