@@ -54,6 +54,8 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES sw_users (id)
     )""")
+    # v: My-X promote flag (idempotent).
+    c.execute("ALTER TABLE sw_watchlist ADD COLUMN IF NOT EXISTS in_my_markets BOOLEAN NOT NULL DEFAULT FALSE")
     c.execute("""CREATE TABLE IF NOT EXISTS sw_notifications (
         id SERIAL PRIMARY KEY,
         user_id INTEGER NOT NULL,
@@ -190,12 +192,13 @@ async def delete_account(user_id: int = Depends(get_current_user)):
 async def get_watchlist(user_id: int = Depends(get_current_user)):
     with get_db() as conn:
         c = conn.cursor()
-        c.execute("""SELECT id, name, location, status, created_at, is_resolved, resolution_outcome
+        c.execute("""SELECT id, name, location, status, created_at, is_resolved, resolution_outcome, in_my_markets
                      FROM sw_watchlist WHERE user_id = %s AND status = 'active'
                      ORDER BY created_at DESC""", (user_id,))
         return [{"id": r[0], "name": r[1], "location": r[2],
                  "status": r[3], "created_at": str(r[4]),
-                 "is_resolved": r[5] or False, "resolution_outcome": r[6]}
+                 "is_resolved": r[5] or False, "resolution_outcome": r[6],
+                 "in_my_markets": bool(r[7])}
                 for r in c.fetchall()]
 
 @app.post("/watchlist")
@@ -209,6 +212,17 @@ async def add_to_watchlist(item: WatchlistItem, user_id: int = Depends(get_curre
         new_id = c.fetchone()[0]
         conn.commit()
         return {"id": new_id, "name": item.name, "location": item.location}
+
+@app.patch("/watchlist/{item_id}")
+async def update_watchlist_item(item_id: int, patch: dict, user_id: int = Depends(get_current_user)):
+    # v: promote/unpromote to My Markets (My-X). Never removes from Watchlist.
+    with get_db() as conn:
+        c = conn.cursor()
+        if "in_my_markets" in patch:
+            c.execute("UPDATE sw_watchlist SET in_my_markets = %s WHERE id = %s AND user_id = %s",
+                      (bool(patch["in_my_markets"]), item_id, user_id))
+            conn.commit()
+        return {"id": item_id, "in_my_markets": bool(patch.get("in_my_markets"))}
 
 @app.delete("/watchlist/{item_id}")
 async def remove_from_watchlist(item_id: int, user_id: int = Depends(get_current_user)):
